@@ -32,7 +32,7 @@ var ErrNotFound = errors.New("file not found")
 func (gen *Generator) WriteFile(out io.Writer, filename string) error {
 	for _, soyfile := range gen.registry.SoyFiles {
 		if soyfile.Name == filename {
-			return Write(out, soyfile, Options{})
+			return Write(out, soyfile, Options{}, DefaultDirectiveResolver, DefaultFuncResolver)
 		}
 	}
 	return ErrNotFound
