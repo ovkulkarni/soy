@@ -15,36 +15,37 @@ import (
 )
 
 type state struct {
-	wr                io.Writer
-	imports           io.Writer
-	node              ast.Node // current node, for errors
-	indentLevels      int
-	namespace         string
-	bufferName        string
-	varnum            int
-	scope             scope
-	autoescape        ast.AutoescapeType
-	lastNode          ast.Node
-	options           Options
-	funcsCalled       []string
-	funcsInFile       []string
-	directiveResolver func(string) (PrintDirective, string, bool, bool)
-	funcResolver      func(string) (Func, string, bool, bool)
+	wr           io.Writer
+	imports      io.Writer
+	node         ast.Node // current node, for errors
+	indentLevels int
+	namespace    string
+	bufferName   string
+	varnum       int
+	scope        scope
+	autoescape   ast.AutoescapeType
+	lastNode     ast.Node
+	options      Options
+	funcsCalled  map[string]string
+	funcsInFile  map[string]bool
 }
 
-// DefaultFuncResolver is the default directive resolver used by state
-// and needs to be passed in to Write. It checks in soyjs.PrintDirectives
-// for the directives
-func DefaultDirectiveResolver(name string) (PrintDirective, string, bool, bool) {
-	var directive, ok = PrintDirectives[name]
-	return directive, name, false, ok
-}
-
-// DefaultFuncResolver is the default function resolver used by state
-// and needs to be passed in to Write. It checks in soyjs.Funcs for the function
-func DefaultFuncResolver(name string) (Func, string, bool, bool) {
-	var fn, ok = Funcs[name]
-	return fn, name, false, ok
+func DefaultResolver(name string, t CallType) (interface{}, string, bool, bool) {
+	switch t {
+	case CallTypeTemplate:
+		return name, name + ".js", true, true
+	case CallTypeFunc:
+		if _, ok := Funcs[name]; !ok {
+			return nil, "", false, false
+		}
+		return Funcs[name], "funcs.js", false, true
+	case CallTypeDirective:
+		if _, ok := PrintDirectives[name]; !ok {
+			return nil, "", false, false
+		}
+		return PrintDirectives[name], "directives.js", false, true
+	}
+	return nil, "", false, false
 }
 
 // removes duplicates from a slice
@@ -64,38 +65,41 @@ func removeDuplicates(elements []string) []string {
 	return result
 }
 
-func difference(a, b []string) []string {
-	mb := map[string]bool{}
-	for _, x := range b {
-		mb[x] = true
-	}
-	ab := []string{}
-	for _, x := range a {
-		if _, ok := mb[x]; !ok {
-			ab = append(ab, x)
+func difference(a map[string]string, b map[string]bool) []string {
+	new := []string{}
+	for key1 := range a {
+		if _, ok := b[key1]; !ok {
+			new = append(new, key1)
 		}
 	}
-	return ab
+	return new
 }
 
-func importStyle(s string) string {
+func ImportStyle(s string) string {
 	return strings.Replace(s, ".", "__", -1)
 }
 
 // Write writes the javascript represented by the given node to the given
 // writer.  The first error encountered is returned.
-func Write(out io.Writer, node ast.Node, options Options, directiveResolver func(string) (PrintDirective, string, bool, bool), funcResolver func(string) (Func, string, bool, bool)) (err error) {
+func Write(out io.Writer, node ast.Node, options Options) (err error) {
 	defer errRecover(&err)
-	importsBuf := bytes.NewBufferString("")
+	importsBuf := &bytes.Buffer{}
 	outTempR, outTempW := io.Pipe()
-	var s = &state{wr: outTempW, imports: importsBuf, directiveResolver: directiveResolver, funcResolver: funcResolver, options: options}
+	if options.Resolver == nil {
+		options.Resolver = DefaultResolver
+	}
+	var s = &state{wr: outTempW,
+		imports:     importsBuf,
+		options:     options,
+		funcsCalled: map[string]string{},
+		funcsInFile: map[string]bool{}}
 
 	go func() {
 		defer outTempW.Close()
 		s.scope.push()
 		s.walk(node)
 	}()
-	fileBuf := bytes.NewBufferString("")
+	fileBuf := &bytes.Buffer{}
 	fileBuf.ReadFrom(outTempR)
 	out.Write(importsBuf.Bytes())
 	out.Write(fileBuf.Bytes())
@@ -281,8 +285,8 @@ func (s *state) visitSoyFile(node *ast.SoyFileNode) {
 	s.jsln("")
 	s.visitChildren(node)
 	s.jsln("")
-	for _, f := range difference(removeDuplicates(s.funcsCalled), removeDuplicates(s.funcsInFile)) {
-		io.WriteString(s.imports, "import { "+f+" } from '"+f+".js';\n")
+	for _, f := range difference(s.funcsCalled, s.funcsInFile) {
+		io.WriteString(s.imports, "import { "+f+" } from '"+s.funcsCalled[f]+"';\n")
 	}
 	s.jsln("")
 }
@@ -333,8 +337,8 @@ func (s *state) visitTemplate(node *ast.TemplateNode) {
 	}
 
 	s.jsln("")
-	s.jsln("export function ", importStyle(node.Name), "(opt_data, opt_sb, opt_ijData) {")
-	s.funcsInFile = append(s.funcsInFile, importStyle(node.Name))
+	s.jsln("export function ", ImportStyle(node.Name), "(opt_data, opt_sb, opt_ijData) {")
+	s.funcsInFile[ImportStyle(node.Name)] = true
 	s.indentLevels++
 	if allOptionalParams {
 		s.jsln("opt_data = opt_data || {};")
@@ -355,10 +359,11 @@ func (s *state) visitPrint(node *ast.PrintNode) {
 	var escape = s.autoescape
 	var directives []*ast.PrintDirectiveNode
 	for _, dir := range node.Directives {
-		var directive, _, _, ok = s.directiveResolver(dir.Name)
+		var d, _, _, ok = s.options.Resolver(dir.Name, CallTypeDirective)
 		if !ok {
 			s.errorf("Print directive %q not found", dir.Name)
 		}
+		var directive, _ = d.(PrintDirective)
 		if directive.CancelAutoescape {
 			escape = ast.AutoescapeOff
 		}
@@ -376,10 +381,11 @@ func (s *state) visitPrint(node *ast.PrintNode) {
 	s.indent()
 	s.js(s.bufferName, " += ")
 	for _, dir := range directives {
-		directive, importName, importThis, _ := s.directiveResolver(dir.Name)
+		d, importFile, importThis, _ := s.options.Resolver(dir.Name, CallTypeDirective)
+		var directive, _ = d.(PrintDirective)
 		s.js(directive.Name, "(")
 		if importThis {
-			s.funcsCalled = append(s.funcsCalled, importName)
+			s.funcsCalled[ImportStyle(directive.Name)] = importFile
 		}
 	}
 	s.walk(node.Arg)
@@ -400,10 +406,11 @@ func (s *state) visitPrint(node *ast.PrintNode) {
 }
 
 func (s *state) visitFunction(node *ast.FunctionNode) {
-	if fn, importName, importThis, ok := s.funcResolver(node.Name); ok {
+	if f, importFile, importThis, ok := s.options.Resolver(node.Name, CallTypeFunc); ok {
+		var fn, _ = f.(Func)
 		fn.Apply(s, node.Args)
 		if importThis {
-			s.funcsCalled = append(s.funcsCalled, importName)
+			s.funcsCalled[node.Name] = importFile
 		}
 		return
 	}
@@ -483,8 +490,11 @@ func (s *state) visitCall(node *ast.CallNode) {
 		}
 		dataExpr += "})"
 	}
-	s.jsln(s.bufferName, " += ", importStyle(node.Name), "(", dataExpr, ", opt_sb, opt_ijData);")
-	s.funcsCalled = append(s.funcsCalled, importStyle(node.Name))
+	s.jsln(s.bufferName, " += ", ImportStyle(node.Name), "(", dataExpr, ", opt_sb, opt_ijData);")
+	_, importFile, importThis, _ := s.options.Resolver(node.Name, CallTypeTemplate)
+	if importThis {
+		s.funcsCalled[ImportStyle(node.Name)] = importFile
+	}
 }
 
 func (s *state) visitIf(node *ast.IfNode) {
@@ -736,7 +746,7 @@ func (s *state) writeRawText(text []byte) {
 // block renders the given node to a temporary buffer and returns the string.
 func (s *state) block(node ast.Node) string {
 	var buf bytes.Buffer
-	(&state{wr: &buf, scope: s.scope, funcsCalled: s.funcsCalled, funcsInFile: s.funcsInFile, directiveResolver: s.directiveResolver, funcResolver: s.funcResolver}).walk(node)
+	(&state{wr: &buf, scope: s.scope, options: s.options, funcsCalled: s.funcsCalled, funcsInFile: s.funcsInFile}).walk(node)
 	return buf.String()
 }
 

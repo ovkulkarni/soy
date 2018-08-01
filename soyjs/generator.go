@@ -8,9 +8,18 @@ import (
 	"github.com/robfig/soy/template"
 )
 
+type CallType int
+
+const (
+	CallTypeTemplate  = iota
+	CallTypeFunc      = iota
+	CallTypeDirective = iota
+)
+
 // Options for js source generation.
 type Options struct {
 	Messages soymsg.Bundle
+	Resolver func(string, CallType) (interface{}, string, bool, bool)
 }
 
 // Generator provides an interface to a template registry capable of generating
@@ -32,7 +41,7 @@ var ErrNotFound = errors.New("file not found")
 func (gen *Generator) WriteFile(out io.Writer, filename string) error {
 	for _, soyfile := range gen.registry.SoyFiles {
 		if soyfile.Name == filename {
-			return Write(out, soyfile, Options{}, DefaultDirectiveResolver, DefaultFuncResolver)
+			return Write(out, soyfile, Options{})
 		}
 	}
 	return ErrNotFound
