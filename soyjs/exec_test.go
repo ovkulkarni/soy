@@ -1024,7 +1024,7 @@ soy.$$escapeHtml = function(arg) { return arg; };
 		return
 	}
 	var buf bytes.Buffer
-	err = Write(&buf, soyfile, Options{}, DefaultDirectiveResolver, DefaultFuncResolver)
+	err = Write(&buf, soyfile, Options{})
 	if err != nil {
 		t.Error(err)
 		return
@@ -1117,7 +1117,7 @@ TESTS_LOOP:
 
 			var buf bytes.Buffer
 			// TODO: Should loop over SoyFiles and add to buffer
-			err = Write(&buf, registry.SoyFiles[0], Options{Messages: test.msgs}, DefaultDirectiveResolver, DefaultFuncResolver)
+			err = Write(&buf, registry.SoyFiles[0], Options{Messages: test.msgs})
 			if err != nil {
 				t.Errorf("%s: write error: %v", test.name, err)
 				continue TESTS_LOOP

@@ -9,6 +9,5 @@ install:
   - go get github.com/robertkrimen/otto
   - go get github.com/howeyc/fsnotify
   - go get github.com/robfig/gettext/po
-  - go get github.com/robfig/soy
 script:
-  - go test github.com/$TRAVIS_REPO_SLUG/...
+  - go test github.com/robfig/soy/...

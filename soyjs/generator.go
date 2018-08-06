@@ -8,18 +8,25 @@ import (
 	"github.com/robfig/soy/template"
 )
 
-type CallType int
+type JSFormat string
+
+type JSFormatter interface {
+	Template(fmt JSFormat, name string) (string, string)
+	Call(fmt JSFormat, name string) (string, string)
+	Directive(fmt JSFormat, name string) (PrintDirective, string)
+	Function(fmt JSFormat, name string) (Func, string)
+}
 
 const (
-	CallTypeTemplate  = iota
-	CallTypeFunc      = iota
-	CallTypeDirective = iota
+	ES5 = "ES5"
+	ES6 = "ES6"
 )
 
 // Options for js source generation.
 type Options struct {
-	Messages soymsg.Bundle
-	Resolver func(string, CallType) (interface{}, string, bool, bool)
+	Messages  soymsg.Bundle
+	Format    JSFormat
+	Formatter JSFormatter
 }
 
 // Generator provides an interface to a template registry capable of generating

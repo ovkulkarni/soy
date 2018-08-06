@@ -30,22 +30,40 @@ type state struct {
 	funcsInFile  map[string]bool
 }
 
-func DefaultResolver(name string, t CallType) (interface{}, string, bool, bool) {
-	switch t {
-	case CallTypeTemplate:
-		return name, name + ".js", true, true
-	case CallTypeFunc:
-		if _, ok := Funcs[name]; !ok {
-			return nil, "", false, false
-		}
-		return Funcs[name], "funcs.js", false, true
-	case CallTypeDirective:
-		if _, ok := PrintDirectives[name]; !ok {
-			return nil, "", false, false
-		}
-		return PrintDirectives[name], "directives.js", false, true
+type defaultFormatter struct{}
+
+func importStyle(s string) string {
+	return strings.Replace(s, ".", "__", -1)
+}
+
+func (f defaultFormatter) Template(frmt JSFormat, name string) (string, string) {
+	if frmt == ES6 {
+		return importStyle(name), "export function " + importStyle(name)
 	}
-	return nil, "", false, false
+	return name, name + " = function"
+}
+
+func (f defaultFormatter) Call(frmt JSFormat, name string) (string, string) {
+	if frmt == ES6 {
+		return importStyle(name), "import { " + importStyle(name) + " } from '" + name + ".js';\n"
+	}
+	return name, ""
+}
+
+func (f defaultFormatter) Directive(frmt JSFormat, name string) (PrintDirective, string) {
+	directive, ok := PrintDirectives[name]
+	if !ok {
+		return PrintDirective{}, ""
+	}
+	return directive, ""
+}
+
+func (f defaultFormatter) Function(frmt JSFormat, name string) (Func, string) {
+	fn, ok := Funcs[name]
+	if !ok {
+		return Func{}, ""
+	}
+	return fn, ""
 }
 
 // removes duplicates from a slice
@@ -75,18 +93,17 @@ func difference(a map[string]string, b map[string]bool) []string {
 	return new
 }
 
-func ImportStyle(s string) string {
-	return strings.Replace(s, ".", "__", -1)
-}
-
 // Write writes the javascript represented by the given node to the given
 // writer.  The first error encountered is returned.
 func Write(out io.Writer, node ast.Node, options Options) (err error) {
 	defer errRecover(&err)
 	importsBuf := &bytes.Buffer{}
 	outTempR, outTempW := io.Pipe()
-	if options.Resolver == nil {
-		options.Resolver = DefaultResolver
+	if options.Format == "" {
+		options.Format = ES5
+	}
+	if options.Formatter == nil {
+		options.Formatter = &defaultFormatter{}
 	}
 	var s = &state{wr: outTempW,
 		imports:     importsBuf,
@@ -286,7 +303,7 @@ func (s *state) visitSoyFile(node *ast.SoyFileNode) {
 	s.visitChildren(node)
 	s.jsln("")
 	for _, f := range difference(s.funcsCalled, s.funcsInFile) {
-		io.WriteString(s.imports, "import { "+f+" } from '"+s.funcsCalled[f]+"';\n")
+		io.WriteString(s.imports, s.funcsCalled[f])
 	}
 	s.jsln("")
 }
@@ -337,8 +354,11 @@ func (s *state) visitTemplate(node *ast.TemplateNode) {
 	}
 
 	s.jsln("")
-	s.jsln("export function ", ImportStyle(node.Name), "(opt_data, opt_sb, opt_ijData) {")
-	s.funcsInFile[ImportStyle(node.Name)] = true
+	callName, callStyle := s.options.Formatter.Template(s.options.Format, node.Name)
+	s.jsln(callStyle, "(opt_data, opt_sb, opt_ijData) {")
+	if s.options.Format == ES6 {
+		s.funcsInFile[callName] = true
+	}
 	s.indentLevels++
 	if allOptionalParams {
 		s.jsln("opt_data = opt_data || {};")
@@ -359,11 +379,10 @@ func (s *state) visitPrint(node *ast.PrintNode) {
 	var escape = s.autoescape
 	var directives []*ast.PrintDirectiveNode
 	for _, dir := range node.Directives {
-		var d, _, _, ok = s.options.Resolver(dir.Name, CallTypeDirective)
-		if !ok {
+		var directive, _ = s.options.Formatter.Directive(s.options.Format, dir.Name)
+		if directive.Name == "" {
 			s.errorf("Print directive %q not found", dir.Name)
 		}
-		var directive, _ = d.(PrintDirective)
 		if directive.CancelAutoescape {
 			escape = ast.AutoescapeOff
 		}
@@ -381,11 +400,10 @@ func (s *state) visitPrint(node *ast.PrintNode) {
 	s.indent()
 	s.js(s.bufferName, " += ")
 	for _, dir := range directives {
-		d, importFile, importThis, _ := s.options.Resolver(dir.Name, CallTypeDirective)
-		var directive, _ = d.(PrintDirective)
+		directive, importString := s.options.Formatter.Directive(s.options.Format, dir.Name)
 		s.js(directive.Name, "(")
-		if importThis {
-			s.funcsCalled[ImportStyle(directive.Name)] = importFile
+		if importString != "" {
+			s.funcsCalled[directive.Name] = importString
 		}
 	}
 	s.walk(node.Arg)
@@ -406,11 +424,10 @@ func (s *state) visitPrint(node *ast.PrintNode) {
 }
 
 func (s *state) visitFunction(node *ast.FunctionNode) {
-	if f, importFile, importThis, ok := s.options.Resolver(node.Name, CallTypeFunc); ok {
-		var fn, _ = f.(Func)
+	if fn, importString := s.options.Formatter.Function(s.options.Format, node.Name); fn.Apply != nil {
 		fn.Apply(s, node.Args)
-		if importThis {
-			s.funcsCalled[node.Name] = importFile
+		if importString != "" {
+			s.funcsCalled[node.Name] = importString
 		}
 		return
 	}
@@ -490,10 +507,10 @@ func (s *state) visitCall(node *ast.CallNode) {
 		}
 		dataExpr += "})"
 	}
-	s.jsln(s.bufferName, " += ", ImportStyle(node.Name), "(", dataExpr, ", opt_sb, opt_ijData);")
-	_, importFile, importThis, _ := s.options.Resolver(node.Name, CallTypeTemplate)
-	if importThis {
-		s.funcsCalled[ImportStyle(node.Name)] = importFile
+	callName, importString := s.options.Formatter.Call(s.options.Format, node.Name)
+	s.jsln(s.bufferName, " += ", callName, "(", dataExpr, ", opt_sb, opt_ijData);")
+	if importString != "" {
+		s.funcsCalled[callName] = importString
 	}
 }
 
