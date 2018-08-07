@@ -8,24 +8,16 @@ import (
 	"github.com/robfig/soy/template"
 )
 
-type JSFormat string
-
 type JSFormatter interface {
-	Template(fmt JSFormat, name string) (string, string)
-	Call(fmt JSFormat, name string) (string, string)
-	Directive(fmt JSFormat, name string) (PrintDirective, string)
-	Function(fmt JSFormat, name string) (Func, string)
+	Template(name string) (string, string)
+	Call(name string) (string, string)
+	Directive(name string) (PrintDirective, string)
+	Function(name string) (Func, string)
 }
-
-const (
-	ES5 = "ES5"
-	ES6 = "ES6"
-)
 
 // Options for js source generation.
 type Options struct {
 	Messages  soymsg.Bundle
-	Format    JSFormat
 	Formatter JSFormatter
 }
 

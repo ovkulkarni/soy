@@ -30,27 +30,22 @@ type state struct {
 	funcsInFile  map[string]bool
 }
 
-type defaultFormatter struct{}
+type ES6Formatter struct{}
+type ES5Formatter struct{}
 
 func importStyle(s string) string {
 	return strings.Replace(s, ".", "__", -1)
 }
 
-func (f defaultFormatter) Template(frmt JSFormat, name string) (string, string) {
-	if frmt == ES6 {
-		return importStyle(name), "export function " + importStyle(name)
-	}
-	return name, name + " = function"
+func (f ES6Formatter) Template(name string) (string, string) {
+	return importStyle(name), "export function " + importStyle(name)
 }
 
-func (f defaultFormatter) Call(frmt JSFormat, name string) (string, string) {
-	if frmt == ES6 {
-		return importStyle(name), "import { " + importStyle(name) + " } from '" + name + ".js';\n"
-	}
-	return name, ""
+func (f ES6Formatter) Call(name string) (string, string) {
+	return importStyle(name), "import { " + importStyle(name) + " } from '" + name + ".js';\n"
 }
 
-func (f defaultFormatter) Directive(frmt JSFormat, name string) (PrintDirective, string) {
+func (f ES6Formatter) Directive(name string) (PrintDirective, string) {
 	directive, ok := PrintDirectives[name]
 	if !ok {
 		return PrintDirective{}, ""
@@ -58,7 +53,31 @@ func (f defaultFormatter) Directive(frmt JSFormat, name string) (PrintDirective,
 	return directive, ""
 }
 
-func (f defaultFormatter) Function(frmt JSFormat, name string) (Func, string) {
+func (f ES6Formatter) Function(name string) (Func, string) {
+	fn, ok := Funcs[name]
+	if !ok {
+		return Func{}, ""
+	}
+	return fn, ""
+}
+
+func (f ES5Formatter) Template(name string) (string, string) {
+	return name, name + " = function"
+}
+
+func (f ES5Formatter) Call(name string) (string, string) {
+	return name, ""
+}
+
+func (f ES5Formatter) Directive(name string) (PrintDirective, string) {
+	directive, ok := PrintDirectives[name]
+	if !ok {
+		return PrintDirective{}, ""
+	}
+	return directive, ""
+}
+
+func (f ES5Formatter) Function(name string) (Func, string) {
 	fn, ok := Funcs[name]
 	if !ok {
 		return Func{}, ""
@@ -99,11 +118,8 @@ func Write(out io.Writer, node ast.Node, options Options) (err error) {
 	defer errRecover(&err)
 	importsBuf := &bytes.Buffer{}
 	outTempR, outTempW := io.Pipe()
-	if options.Format == "" {
-		options.Format = ES5
-	}
 	if options.Formatter == nil {
-		options.Formatter = &defaultFormatter{}
+		options.Formatter = &ES5Formatter{}
 	}
 	var s = &state{wr: outTempW,
 		imports:     importsBuf,
@@ -354,11 +370,9 @@ func (s *state) visitTemplate(node *ast.TemplateNode) {
 	}
 
 	s.jsln("")
-	callName, callStyle := s.options.Formatter.Template(s.options.Format, node.Name)
+	callName, callStyle := s.options.Formatter.Template(node.Name)
 	s.jsln(callStyle, "(opt_data, opt_sb, opt_ijData) {")
-	if s.options.Format == ES6 {
-		s.funcsInFile[callName] = true
-	}
+	s.funcsInFile[callName] = true
 	s.indentLevels++
 	if allOptionalParams {
 		s.jsln("opt_data = opt_data || {};")
@@ -379,7 +393,7 @@ func (s *state) visitPrint(node *ast.PrintNode) {
 	var escape = s.autoescape
 	var directives []*ast.PrintDirectiveNode
 	for _, dir := range node.Directives {
-		var directive, _ = s.options.Formatter.Directive(s.options.Format, dir.Name)
+		var directive, _ = s.options.Formatter.Directive(dir.Name)
 		if directive.Name == "" {
 			s.errorf("Print directive %q not found", dir.Name)
 		}
@@ -400,7 +414,7 @@ func (s *state) visitPrint(node *ast.PrintNode) {
 	s.indent()
 	s.js(s.bufferName, " += ")
 	for _, dir := range directives {
-		directive, importString := s.options.Formatter.Directive(s.options.Format, dir.Name)
+		directive, importString := s.options.Formatter.Directive(dir.Name)
 		s.js(directive.Name, "(")
 		if importString != "" {
 			s.funcsCalled[directive.Name] = importString
@@ -424,7 +438,7 @@ func (s *state) visitPrint(node *ast.PrintNode) {
 }
 
 func (s *state) visitFunction(node *ast.FunctionNode) {
-	if fn, importString := s.options.Formatter.Function(s.options.Format, node.Name); fn.Apply != nil {
+	if fn, importString := s.options.Formatter.Function(node.Name); fn.Apply != nil {
 		fn.Apply(s, node.Args)
 		if importString != "" {
 			s.funcsCalled[node.Name] = importString
@@ -507,7 +521,7 @@ func (s *state) visitCall(node *ast.CallNode) {
 		}
 		dataExpr += "})"
 	}
-	callName, importString := s.options.Formatter.Call(s.options.Format, node.Name)
+	callName, importString := s.options.Formatter.Call(node.Name)
 	s.jsln(s.bufferName, " += ", callName, "(", dataExpr, ", opt_sb, opt_ijData);")
 	if importString != "" {
 		s.funcsCalled[callName] = importString
