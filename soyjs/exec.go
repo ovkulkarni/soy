@@ -16,7 +16,6 @@ import (
 
 type state struct {
 	wr           io.Writer
-	imports      io.Writer
 	node         ast.Node // current node, for errors
 	indentLevels int
 	namespace    string
@@ -30,36 +29,11 @@ type state struct {
 	funcsInFile  map[string]bool
 }
 
-type ES6Formatter struct{}
 type ES5Formatter struct{}
+type ES6Formatter struct{}
 
-func importStyle(s string) string {
-	return strings.Replace(s, ".", "__", -1)
-}
-
-func (f ES6Formatter) Template(name string) (string, string) {
-	return importStyle(name), "export function " + importStyle(name)
-}
-
-func (f ES6Formatter) Call(name string) (string, string) {
-	return importStyle(name), "import { " + importStyle(name) + " } from '" + name + ".js';"
-}
-
-func (f ES6Formatter) Directive(name string) (PrintDirective, string) {
-	directive, ok := PrintDirectives[name]
-	if !ok {
-		return PrintDirective{}, ""
-	}
-	return directive, ""
-}
-
-func (f ES6Formatter) Function(name string) (Func, string) {
-	fn, ok := Funcs[name]
-	if !ok {
-		return Func{}, ""
-	}
-	return fn, ""
-}
+var _ JSFormatter = (*ES6Formatter)(nil)
+var _ JSFormatter = (*ES5Formatter)(nil)
 
 func (f ES5Formatter) Template(name string) (string, string) {
 	return name, name + " = function"
@@ -69,20 +43,32 @@ func (f ES5Formatter) Call(name string) (string, string) {
 	return name, ""
 }
 
-func (f ES5Formatter) Directive(name string) (PrintDirective, string) {
-	directive, ok := PrintDirectives[name]
-	if !ok {
-		return PrintDirective{}, ""
-	}
-	return directive, ""
+func (f ES5Formatter) Directive(dir PrintDirective) string {
+	return ""
 }
 
-func (f ES5Formatter) Function(name string) (Func, string) {
-	fn, ok := Funcs[name]
-	if !ok {
-		return Func{}, ""
-	}
-	return fn, ""
+func (f ES5Formatter) Function(fn Func) string {
+	return ""
+}
+
+func es6Identifier(s string) string {
+	return strings.Replace(s, ".", "__", -1)
+}
+
+func (f ES6Formatter) Template(name string) (string, string) {
+	return es6Identifier(name), "export function " + es6Identifier(name)
+}
+
+func (f ES6Formatter) Call(name string) (string, string) {
+	return es6Identifier(name), "import { " + es6Identifier(name) + " } from '" + name + ".js';"
+}
+
+func (f ES6Formatter) Directive(dir PrintDirective) string {
+	return "import { " + es6Identifier(dir.Name) + " } from '" + dir.Name + ".js';"
+}
+
+func (f ES6Formatter) Function(fn Func) string {
+	return "import { " + es6Identifier(fn.Name) + " } from '" + fn.Name + ".js';"
 }
 
 // removes duplicates from a slice
@@ -116,26 +102,36 @@ func difference(a map[string]string, b map[string]bool) []string {
 // writer.  The first error encountered is returned.
 func Write(out io.Writer, node ast.Node, options Options) (err error) {
 	defer errRecover(&err)
-	importsBuf := &bytes.Buffer{}
-	outTempR, outTempW := io.Pipe()
+
 	if options.Formatter == nil {
 		options.Formatter = &ES5Formatter{}
 	}
-	var s = &state{wr: outTempW,
-		imports:     importsBuf,
-		options:     options,
-		funcsCalled: map[string]string{},
-		funcsInFile: map[string]bool{}}
 
-	go func() {
-		defer outTempW.Close()
-		s.scope.push()
-		s.walk(node)
-	}()
-	fileBuf := &bytes.Buffer{}
-	fileBuf.ReadFrom(outTempR)
+	var (
+		tmpOut     = &bytes.Buffer{}
+		importsBuf = &bytes.Buffer{}
+		s          = &state{
+			wr:          tmpOut,
+			options:     options,
+			funcsCalled: map[string]string{},
+			funcsInFile: map[string]bool{},
+		}
+	)
+
+	s.scope.push()
+	s.walk(node)
+
+	if len(s.funcsCalled) > 0 {
+		for _, f := range difference(s.funcsCalled, s.funcsInFile) {
+			importsBuf.Write([]byte(s.funcsCalled[f]))
+			importsBuf.Write([]byte("\n"))
+		}
+		importsBuf.Write([]byte("\n"))
+	}
+
 	out.Write(importsBuf.Bytes())
-	out.Write(fileBuf.Bytes())
+	out.Write(tmpOut.Bytes())
+
 	return nil
 }
 
@@ -313,16 +309,10 @@ func (s *state) walk(node ast.Node) {
 }
 
 func (s *state) visitSoyFile(node *ast.SoyFileNode) {
-	io.WriteString(s.imports, "// This file was automatically generated from "+node.Name+".\n")
-	io.WriteString(s.imports, "// Please don't edit this file by hand.\n")
+	s.jsln("// This file was automatically generated from ", node.Name, ".")
+	s.jsln("// Please don't edit this file by hand.")
 	s.jsln("")
 	s.visitChildren(node)
-	s.jsln("")
-	for _, f := range difference(s.funcsCalled, s.funcsInFile) {
-		s.imports.Write([]byte(s.funcsCalled[f]))
-		s.imports.Write([]byte("\n"))
-	}
-	s.jsln("")
 }
 
 func (s *state) visitChildren(parent ast.ParentNode) {
@@ -394,8 +384,8 @@ func (s *state) visitPrint(node *ast.PrintNode) {
 	var escape = s.autoescape
 	var directives []*ast.PrintDirectiveNode
 	for _, dir := range node.Directives {
-		var directive, _ = s.options.Formatter.Directive(dir.Name)
-		if directive.Name == "" {
+		var directive, ok = PrintDirectives[dir.Name]
+		if !ok {
 			s.errorf("Print directive %q not found", dir.Name)
 		}
 		if directive.CancelAutoescape {
@@ -406,6 +396,9 @@ func (s *state) visitPrint(node *ast.PrintNode) {
 			// no implementation, they just serve as a marker to cancel autoescape.
 		default:
 			directives = append(directives, dir)
+			if impt := s.options.Formatter.Directive(directive); impt != "" {
+				s.funcsCalled[dir.Name] = impt
+			}
 		}
 	}
 	if escape != ast.AutoescapeOff {
@@ -415,11 +408,7 @@ func (s *state) visitPrint(node *ast.PrintNode) {
 	s.indent()
 	s.js(s.bufferName, " += ")
 	for _, dir := range directives {
-		directive, importString := s.options.Formatter.Directive(dir.Name)
-		s.js(directive.Name, "(")
-		if importString != "" {
-			s.funcsCalled[directive.Name] = importString
-		}
+		s.js(PrintDirectives[dir.Name].Name, "(")
 	}
 	s.walk(node.Arg)
 	for i := range directives {
@@ -439,10 +428,10 @@ func (s *state) visitPrint(node *ast.PrintNode) {
 }
 
 func (s *state) visitFunction(node *ast.FunctionNode) {
-	if fn, importString := s.options.Formatter.Function(node.Name); fn.Apply != nil {
+	if fn, ok := Funcs[node.Name]; ok {
 		fn.Apply(s, node.Args)
-		if importString != "" {
-			s.funcsCalled[node.Name] = importString
+		if impt := s.options.Formatter.Function(fn); impt != "" {
+			s.funcsCalled[node.Name] = impt
 		}
 		return
 	}

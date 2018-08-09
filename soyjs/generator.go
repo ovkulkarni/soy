@@ -11,8 +11,8 @@ import (
 type JSFormatter interface {
 	Template(name string) (string, string)
 	Call(name string) (string, string)
-	Directive(name string) (PrintDirective, string)
-	Function(name string) (Func, string)
+	Directive(PrintDirective) string
+	Function(Func) string
 }
 
 // Options for js source generation.
