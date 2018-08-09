@@ -42,7 +42,7 @@ func (f ES6Formatter) Template(name string) (string, string) {
 }
 
 func (f ES6Formatter) Call(name string) (string, string) {
-	return importStyle(name), "import { " + importStyle(name) + " } from '" + name + ".js';\n"
+	return importStyle(name), "import { " + importStyle(name) + " } from '" + name + ".js';"
 }
 
 func (f ES6Formatter) Directive(name string) (PrintDirective, string) {
@@ -319,7 +319,8 @@ func (s *state) visitSoyFile(node *ast.SoyFileNode) {
 	s.visitChildren(node)
 	s.jsln("")
 	for _, f := range difference(s.funcsCalled, s.funcsInFile) {
-		io.WriteString(s.imports, s.funcsCalled[f])
+		s.imports.Write([]byte(s.funcsCalled[f]))
+		s.imports.Write([]byte("\n"))
 	}
 	s.jsln("")
 }
