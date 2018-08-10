@@ -12,8 +12,8 @@ var PrintDirectives = map[string]PrintDirective{
 	"insertWordBreaks":  {"soy.$$insertWordBreaks", true},
 	"changeNewlineToBr": {"soy.$$changeNewlineToBr", true},
 	"truncate":          {"soy.$$truncate", false},
-	"id":                {"-", true}, // visitPrint() will turn into a noop
-	"noAutoescape":      {"-", true}, // visitPrint() will turn into a noop
+	"id":                {"", true}, // visitPrint() will turn into a noop
+	"noAutoescape":      {"", true}, // visitPrint() will turn into a noop
 	"escapeHtml":        {"soy.$$escapeHtml", true},
 	"escapeUri":         {"soy.$$escapeUri", true},
 	"escapeJsString":    {"soy.$$escapeJsString", true},
